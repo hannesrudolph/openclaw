@@ -118,11 +118,13 @@ it.skipIf(process.platform !== "darwin")(
     });
     expect(version.status, version.stderr).toBe(0);
     expect(version.stdout.trim()).toBe(`OpenClaw 2026.8.1 (${commit})`);
-    const codexVersion = spawnSync(path.join(prefix, "tools", "node", "bin", "codex"), [
-      "--version",
-    ], {
-      encoding: "utf8",
-    });
+    const codexVersion = spawnSync(
+      path.join(prefix, "tools", "node", "bin", "codex"),
+      ["--version"],
+      {
+        encoding: "utf8",
+      },
+    );
     expect(codexVersion.status, codexVersion.stderr).toBe(0);
     expect(codexVersion.stdout.trim()).toBe("codex-cli 0.147.0");
     expect(readFileSync(path.join(prefix, "bin", "openclaw"), "utf8")).toContain(
