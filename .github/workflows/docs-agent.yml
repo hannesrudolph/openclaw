@@ -212,8 +212,8 @@ jobs:
           fi
 
           added_or_deleted="$(
-            python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff HEAD --name-status --diff-filter=AD || exit 1
-            python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff --cached HEAD --name-status --diff-filter=AD || exit 1
+            python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff HEAD --name-status --diff-filter=AD || exit "$?"
+            python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff --cached HEAD --name-status --diff-filter=AD || exit "$?"
           )"
           if [ -n "$added_or_deleted" ]; then
             echo "Docs agent added or deleted tracked files; forbidden:"
@@ -250,8 +250,8 @@ jobs:
           # A restored working copy can still hide a forbidden edit in the index.
           bad_paths="$(
             {
-              python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff HEAD --name-only || exit 1
-              python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff --cached HEAD --name-only || exit 1
+              python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff HEAD --name-only || exit "$?"
+              python3 -I -S "$CI_GIT_OWNER" --checkout-git 0 diff --cached HEAD --name-only || exit "$?"
             } | sort -u | filter_bad_paths
           )"
           if [ -n "$bad_paths" ]; then
