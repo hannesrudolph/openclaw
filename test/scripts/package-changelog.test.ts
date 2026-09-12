@@ -1,14 +1,18 @@
 // Package Changelog tests cover package changelog script behavior.
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   extractCurrentPackageChangelog,
   preparePackageChangelog,
+  readCurrentPackageChangelog,
   resolvePackageChangelogVersions,
   restorePackageChangelog,
 } from "../../scripts/package-changelog.mjs";
+import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 function changelog(strings: TemplateStringsArray, ...values: string[]) {
   return `${String.raw({ raw: strings }, ...values)
@@ -43,6 +47,58 @@ const oversizedChangelog = cumulativeChangelog.replace(
 );
 
 describe("package-changelog", () => {
+  it("packages only a split release, pins its record, and restores the index after source edits", async () => {
+    const root = tempDirs.make("openclaw-package-changelog-split-");
+    const index = "# Changelog\n\n- [2026.5.28](CHANGELOG/2026.5.28.md)\n";
+    const section = `## 2026.5.28\n\n- Complete editorial notes and credit. Thanks @contributor.\n\n${oversizedContributionRecord}\n`;
+    mkdirSync(path.join(root, "CHANGELOG", "records"), { recursive: true });
+    writeFileSync(path.join(root, "package.json"), '{"version":"2026.5.28-beta.1"}\n');
+    writeFileSync(path.join(root, "CHANGELOG.md"), index);
+    writeFileSync(path.join(root, "CHANGELOG", "2026.5.28.md"), section);
+    writeFileSync(
+      path.join(root, "CHANGELOG", "records", "2026.5.28.md"),
+      `## 2026.5.28\n\n${oversizedContributionRecord}\n`,
+    );
+    writeFileSync(path.join(root, "CHANGELOG", "2026.5.27.md"), "## 2026.5.27\n\n- Old history.\n");
+
+    await expect(preparePackageChangelog(root)).resolves.toBe(true);
+    const packaged = readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
+    expect(packaged).toContain("Complete editorial notes and credit.");
+    expect(packaged).toContain("/blob/v2026.5.28-beta.1/CHANGELOG/records/2026.5.28.md");
+    expect(packaged).not.toContain("Old history");
+    expect(Buffer.byteLength(packaged)).toBeLessThanOrEqual(500 * 1024);
+
+    writeFileSync(
+      path.join(root, "CHANGELOG", "2026.5.28.md"),
+      `${section}\n- Later source edit.\n`,
+    );
+    await expect(restorePackageChangelog(root)).resolves.toBe(true);
+    expect(readFileSync(path.join(root, "CHANGELOG.md"), "utf8")).toBe(index);
+    expect(readFileSync(path.join(root, "CHANGELOG", "2026.5.28.md"), "utf8")).toContain(
+      "Later source edit",
+    );
+  });
+
+  it("keeps split prerelease fallback and rejects unsafe exact notes", () => {
+    const root = tempDirs.make("openclaw-package-changelog-split-");
+    mkdirSync(path.join(root, "CHANGELOG"));
+    writeFileSync(path.join(root, "CHANGELOG.md"), "# Changelog\n");
+    writeFileSync(
+      path.join(root, "CHANGELOG", "2026.5.30.md"),
+      "## 2026.5.30 (Unreleased)\n\n- Pending release notes with sufficient detail.\n",
+    );
+    expect(readCurrentPackageChangelog(root, "2026.5.28-beta.1")).toContain(
+      "Pending release notes",
+    );
+    expect(() => readCurrentPackageChangelog(root, "2026.5.28")).toThrow(
+      "does not contain a release section",
+    );
+    writeFileSync(path.join(root, "CHANGELOG", "2026.5.28.md"), "## 2026.5.28\n- Tiny.\n");
+    expect(() => readCurrentPackageChangelog(root, "2026.5.28-beta.1")).toThrow(
+      "only 7 body bytes",
+    );
+  });
+
   it("maps release-channel package versions to package changelog candidate headings", () => {
     expect(resolvePackageChangelogVersions("2026.5.28")).toEqual(["2026.5.28"]);
     expect(resolvePackageChangelogVersions("2026.5.28-1")).toEqual(["2026.5.28-1"]);
@@ -268,6 +324,8 @@ Docs: https://docs.openclaw.ai
         writeFileSync(path.join(root, "CHANGELOG.md"), unreleasedChangelog, "utf8");
 
         await expect(preparePackageChangelog(root, { allowUnreleased: true })).resolves.toBe(true);
+        // Older published packers retained only the source backup.
+        rmSync(path.join(root, ".artifacts", "package-changelog", "CHANGELOG.md.packaged"));
         await expect(restorePackageChangelog(root)).resolves.toBe(true);
         expect(readFileSync(path.join(root, "CHANGELOG.md"), "utf8")).toBe(unreleasedChangelog);
       } finally {

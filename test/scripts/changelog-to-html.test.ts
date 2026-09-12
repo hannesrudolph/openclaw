@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,11 +8,15 @@ const roots: string[] = [];
 const footer =
   '<p><a href="https://github.com/openclaw/openclaw/blob/main/CHANGELOG.md">View full changelog</a></p>';
 
-function render(section: string, version = "2026.8.2") {
+function render(section: string, version = "2026.8.2", split = false) {
   const root = mkdtempSync(path.join(tmpdir(), "openclaw-changelog-html-"));
   roots.push(root);
   const file = path.join(root, "CHANGELOG.md");
-  writeFileSync(file, section);
+  writeFileSync(file, split ? "# Changelog\n\n- [Release](CHANGELOG/2026.8.2.md)\n" : section);
+  if (split) {
+    mkdirSync(path.join(root, "CHANGELOG"));
+    writeFileSync(path.join(root, "CHANGELOG", `${version}.md`), section);
+  }
   return spawnSync("bash", ["scripts/changelog-to-html.sh", version, file], {
     encoding: "utf8",
     timeout: 10_000,
@@ -27,6 +31,14 @@ afterEach(() => {
 });
 
 describe("changelog release HTML", () => {
+  it("renders the selected split file through the source index", () => {
+    const result = render("## 2026.8.2\n\n### Fixes\n- Current release.\n", "2026.8.2", true);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(
+      `<h2>OpenClaw 2026.8.2</h2>\n<h3>Fixes</h3>\n<ul>\n<li>Current release.</li>\n</ul>\n${footer}\n`,
+    );
+  });
+
   it("preserves markup ordering, literal HTML, links, backslashes and list boundaries", () => {
     const result = render(
       [
