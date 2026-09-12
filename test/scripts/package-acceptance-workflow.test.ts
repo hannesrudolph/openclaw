@@ -5631,6 +5631,8 @@ gh() {
     done
     cp "$RUNNER_TEMP/preflight-manifest.json" "$destination/"
     cp -R "$RUNNER_TEMP/dependency-evidence" "$destination/"
+  elif [[ "$1 $2" == "release view" ]]; then
+    printf '%s\\n' 'Initial release notes'
   elif [[ "$1 $2" == "release edit" ]]; then
     record notes
   else return 99; fi

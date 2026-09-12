@@ -44,9 +44,10 @@ const { findChangelogSection, findReleaseChangelog } = await import(
   pathToFileURL(path.join(scriptDir, "lib/release-changelog.mjs")).href
 );
 try {
-  const section = path.basename(file) === "CHANGELOG.md"
+  const markdown = path.basename(file) === "CHANGELOG.md"
     ? findReleaseChangelog({ rootDir: path.dirname(path.resolve(file)), version })?.section
-    : findChangelogSection(readFileSync(file, "utf8"), version);
+    : readFileSync(file, "utf8");
+  const section = markdown && findChangelogSection(markdown, version);
   if (section) process.stdout.write(section.replace(/^[^\n]*(?:\n|$)/u, ""));
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

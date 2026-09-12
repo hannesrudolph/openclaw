@@ -105,7 +105,20 @@ export function readCurrentPackageChangelog(rootDir, packageVersion, options = {
     if (!source) {
       continue;
     }
-    const content = `${source.preamble}\n\n${source.section}`;
+    let content = `${source.preamble}\n\n${source.section}`;
+    if (
+      source.format === "docs-mirror" &&
+      Buffer.byteLength(`${content.trimEnd()}\n`, "utf8") > MAX_PACKAGED_CHANGELOG_BYTES
+    ) {
+      content = [
+        source.preamble,
+        `## ${source.version}`,
+        "The complete release documentation exceeds the package's 500 KiB changelog limit.",
+        `Read the [full release notes](https://github.com/openclaw/openclaw/blob/main/${source.sourcePath}) ([Raw](https://github.com/openclaw/openclaw/raw/refs/heads/main/${source.sourcePath})) or the [release documentation](https://docs.openclaw.ai/releases/${source.version}).`,
+        `The [complete contribution record](https://github.com/openclaw/openclaw/blob/main/${source.recordPath}#complete-contribution-record) remains available separately.`,
+        "The changelog and contribution-record links follow the maintained files on main.",
+      ].join("\n\n");
+    }
     return extractCurrentPackageChangelog(content, packageVersion, {
       ...options,
       recordPath: source.recordPath ?? undefined,

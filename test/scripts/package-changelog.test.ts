@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { renderReleaseDocsMirror } from "../../scripts/lib/release-docs-mirror.mjs";
 import {
   extractCurrentPackageChangelog,
   preparePackageChangelog,
@@ -47,6 +48,55 @@ const oversizedChangelog = cumulativeChangelog.replace(
 );
 
 describe("package-changelog", () => {
+  it.each([1, 20_000])(
+    "packages a %i-paragraph docs mirror and restores every source artifact",
+    async (paragraphs) => {
+      const root = tempDirs.make("openclaw-package-changelog-mirror-");
+      const version = "2026.5.28";
+      const docsPath = `docs/releases/${version}.md`;
+      const entryPath = `CHANGELOG/${version}.md`;
+      const recordPath = `CHANGELOG/records/${version}.md`;
+      const index = `# Changelog\n\n- [${version}](${entryPath})\n`;
+      const docs = `# Release notes\n\n${"Complete release documentation.\n\n".repeat(paragraphs)}Final release detail.\n`;
+      const record = `## ${version}\n\n### Complete contribution record\n\n- **PR #123** Thanks @contributor.\n`;
+      mkdirSync(path.join(root, "docs", "releases"), { recursive: true });
+      mkdirSync(path.join(root, "CHANGELOG", "records"), { recursive: true });
+      writeFileSync(path.join(root, "package.json"), `${JSON.stringify({ version })}\n`);
+      writeFileSync(path.join(root, docsPath), docs);
+      const mirror = renderReleaseDocsMirror({ rootDir: root, version, sources: [docsPath] });
+      const sources = new Map([
+        ["CHANGELOG.md", index],
+        [docsPath, docs],
+        [entryPath, mirror],
+        [recordPath, record],
+      ]);
+      for (const [file, content] of sources) {
+        writeFileSync(path.join(root, file), content);
+      }
+      await expect(preparePackageChangelog(root)).resolves.toBe(true);
+      const packaged = readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
+      expect(packaged).toContain(`## ${version}`);
+      if (paragraphs === 1) {
+        expect(packaged).toBe(`# Changelog\n\n${mirror.trimEnd()}\n`);
+      } else {
+        expect(Buffer.byteLength(mirror)).toBeGreaterThan(500 * 1024);
+        expect(packaged).toContain(`https://github.com/openclaw/openclaw/blob/main/${entryPath}`);
+        expect(packaged).toContain(
+          `https://github.com/openclaw/openclaw/raw/refs/heads/main/${entryPath}`,
+        );
+        expect(packaged).toContain(`https://github.com/openclaw/openclaw/blob/main/${recordPath}`);
+        expect(packaged).toContain(`https://docs.openclaw.ai/releases/${version}`);
+        expect(packaged).not.toContain(`/v${version}/`);
+      }
+      expect(Buffer.byteLength(packaged)).toBeLessThanOrEqual(500 * 1024);
+
+      await expect(restorePackageChangelog(root)).resolves.toBe(true);
+      for (const [file, content] of sources) {
+        expect(readFileSync(path.join(root, file), "utf8")).toBe(content);
+      }
+    },
+  );
+
   it("packages only a split release, pins its record, and restores the index after source edits", async () => {
     const root = tempDirs.make("openclaw-package-changelog-split-");
     const index = "# Changelog\n\n- [2026.5.28](CHANGELOG/2026.5.28.md)\n";
