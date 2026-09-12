@@ -2490,6 +2490,7 @@ describe("scripts/changed-lanes", () => {
       "check:wrapper-shadowing",
       "deps:patches:check",
       "release-metadata:check",
+      "changelog:check",
       "android:version:check",
       "config:schema:check",
       "deps:root-ownership:check",
@@ -2507,6 +2508,9 @@ describe("scripts/changed-lanes", () => {
     expect(
       plan.commands.find((command) => command.args[0] === "release-metadata:check")?.args,
     ).toEqual(["release-metadata:check", "--base", "main", "--head", "feature"]);
+    expect(plan.commands.find((command) => command.args[0] === "changelog:check")?.args).toEqual([
+      "changelog:check",
+    ]);
   });
 
   it("keeps docs plus changelog entries on the docs-only changed gate", () => {

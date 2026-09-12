@@ -1884,7 +1884,7 @@
     "qa:otel:smoke": "node --import ./scripts/tsx.mjs test/e2e/qa-lab/runtime/qa-otel-smoke-runtime.ts",
     "qa:code-mode-models": "node --import ./scripts/tsx.mjs scripts/code-mode-model-matrix.ts",
     "qa:prometheus:smoke": "node scripts/run-node.mjs qa suite --provider-mode mock-openai --scenario docker-prometheus-smoke --concurrency 1 --fast",
-    "release-metadata:check": "node --import ./scripts/tsx.mjs scripts/check-release-metadata-only.mts && pnpm changelog:check",
+    "release-metadata:check": "node --import ./scripts/tsx.mjs scripts/check-release-metadata-only.mts",
     "release:beta": "node --import ./scripts/tsx.mjs scripts/release-candidate-checklist.mts",
     "release:beta-smoke": "node --import ./scripts/tsx.mjs scripts/release-beta-smoke.ts",
     "release:candidate": "node --import ./scripts/tsx.mjs scripts/release-candidate-checklist.mts",
