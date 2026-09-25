@@ -168,7 +168,7 @@ export async function reloadGatewayPlugins(
     recordCleanup,
     retainRetirement: (retire) => kernel.pluginMetadata.retire(cache, retire),
   });
-  const replacement = kernel.pluginRuntimeGeneration.reserve();
+  let replacement: ReturnType<typeof kernel.pluginRuntimeGeneration.reserve> | undefined;
   const assertCurrent = () => {
     params.assertInvokerOwned?.();
     if (params.isAborted?.()) {
@@ -248,12 +248,13 @@ export async function reloadGatewayPlugins(
     assertCurrent();
     // No yield between the final work check, admission fence, and invalidation.
     releaseResourceHandoff = reserveResourceHandoff(resourceHandoffIds);
+    const activeReplacement = (replacement = kernel.pluginRuntimeGeneration.reserve());
     rollbackConfigEffects = params.prepareConfigEffects({
       pluginIds: changedPluginIds,
       channels: channelTargets,
     });
     phase = "drain";
-    replacement.setReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
+    activeReplacement.setReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
     channels.pause();
     decisionReplacement = prepareDecisionProviderReload(previousRegistry, changedPluginIds);
     for (const sidecar of runtimeState.gatewayLifetimeSidecars.snapshot()) {
@@ -304,7 +305,7 @@ export async function reloadGatewayPlugins(
       await drainBeforeReplacement(
         resourceHandoffIds,
         restartDrainSignal,
-        replacement.setReloadStatus,
+        activeReplacement.setReloadStatus,
       );
     } catch (error) {
       if (error instanceof PluginHostCleanupTimeoutError) {
@@ -313,7 +314,7 @@ export async function reloadGatewayPlugins(
       throw error;
     }
     assertCurrent();
-    replacement.setReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
+    activeReplacement.setReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
     // Channel monitors and services hold long-lived consumers until stop cancels
     // their loops. Ask those owners to stop before joining the remaining work.
     previousStopStarted = true;
@@ -408,8 +409,8 @@ export async function reloadGatewayPlugins(
           );
           publishMetadata();
           runtime.pluginMetadataSnapshot = nextMetadata;
-          replacement.commit();
-          kernel.pluginRuntimeGeneration.publishServices(replacement.claim, startedServices);
+          activeReplacement.commit();
+          kernel.pluginRuntimeGeneration.publishServices(activeReplacement.claim, startedServices);
           // Compare handshake descriptors before the prepared credentials replace them.
           // Changed nodes stay invalidated while their connections close.
           for (const client of clients) {
@@ -448,7 +449,7 @@ export async function reloadGatewayPlugins(
       await attempt(activationErrors, () =>
         runtimeState.discovery?.update(
           { gatewayDiscoveryServices: nextRegistry.gatewayDiscoveryServices },
-          replacement.claim,
+          activeReplacement.claim,
         ),
       );
     }
@@ -487,7 +488,7 @@ export async function reloadGatewayPlugins(
     const onCleanupFailure = (message: string) => (cleanupError: unknown) => {
       failure = new AggregateError([failure, cleanupError], message);
     };
-    replacement.reject();
+    replacement?.reject();
     if (!committed) {
       const candidateRegistry =
         loaded?.pluginRegistry ??
@@ -542,7 +543,7 @@ export async function reloadGatewayPlugins(
           if (previousStopStarted) {
             // Stop is not reversible for all plugins (for example, aborted controllers).
             // Re-register captured old code instead of reopening a stopped registration.
-            await drainForRecovery(restartDrainSignal, replacement.setReloadStatus);
+            await drainForRecovery(restartDrainSignal, replacement!.setReloadStatus);
             if (!previousHooksStopped) {
               previousHooksStopped = true;
               await runLifecycleHooks(
@@ -712,7 +713,7 @@ export async function reloadGatewayPlugins(
     // instances keep their own resource/admission fence until a later safe reload.
     channels.release("failed");
     const activated = phase === "dispose";
-    replacement.finishReload(
+    replacement?.finishReload(
       activated ? "applied" : restored ? "restored" : phase === "prepare" ? "unchanged" : "failed",
       changedPluginIds,
       pluginRuntime.registry,
