@@ -1,4 +1,3 @@
-import path from "node:path";
 import { embeddedAgentLog } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { codexCatalogHomeId } from "../session-catalog-home-id.js";
 import {
@@ -29,7 +28,6 @@ import {
   assertCodexThreadAcceptsDirectInput,
   assertCodexThreadStartResponse,
 } from "./protocol-validators.js";
-import type { CodexThread } from "./protocol.js";
 import { isCodexThreadReadMissingError } from "./rpc-error.js";
 import type { CodexAppServerThreadBinding } from "./session-binding.js";
 import { getCurrentSharedClientEntry } from "./shared-client-lifecycle.js";
@@ -54,20 +52,8 @@ import { resolveCodexAppServerModelProvider } from "./thread-model-selection.js"
 import { CodexThreadPolicyHandoffError, refreshCodexThreadPolicy } from "./thread-policy.js";
 import { buildThreadResumeParams, buildThreadStartParams } from "./thread-requests.js";
 import { resumeCodexAppServerThread } from "./thread-resume.js";
+import { resolveCodexThreadRolloutPath } from "./thread-rollout-path.js";
 import { hasCodexAppServerSiblingRouteWork } from "./turn-router.js";
-
-function resolveCodexThreadRolloutPath(thread: CodexThread): string | undefined {
-  const rolloutPath = thread.path?.trim();
-  if (
-    !rolloutPath ||
-    !path.isAbsolute(rolloutPath) ||
-    path.extname(rolloutPath) !== ".jsonl" ||
-    !path.basename(rolloutPath).includes(thread.id)
-  ) {
-    return undefined;
-  }
-  return rolloutPath;
-}
 
 export async function resumeExistingCodexThread(
   params: CodexStartOrResumeThreadParams,

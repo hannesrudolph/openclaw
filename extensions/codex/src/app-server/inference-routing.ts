@@ -8,6 +8,17 @@ import {
 } from "./config-layer-policy.js";
 import type { CodexInferenceProxy } from "./inference-proxy.js";
 import type { CodexInferenceThreadQualification } from "./inference-qualification.js";
+import {
+  configuredProviders,
+  hasProviderAws,
+  projectProviderRoutes,
+  providerKind,
+  readProviderBaseUrl,
+  readProviderField,
+  responsesOAuthProvider,
+  withProviderBaseUrl,
+  type CodexInferenceProviderKind,
+} from "./inference-routing-config.js";
 import { isJsonObject, type CodexConfigReadResponse, type JsonObject } from "./protocol.js";
 import { CODEX_RESPONSES_OAUTH_PROVIDER, type CodexResponsesOAuth } from "./responses-oauth.js";
 import type { CodexAppServerThreadBinding } from "./session-binding.js";
@@ -20,8 +31,6 @@ type ThreadRoutes = {
   providers: CodexInferenceProviderRoutes;
   qualification?: CodexInferenceThreadQualification;
 };
-type ProviderKind = "openai" | "azure" | "other";
-
 type Owner = {
   closed: boolean;
   memoryConfigured: boolean;
@@ -29,7 +38,7 @@ type Owner = {
   threads: Map<string, ThreadRoutes>;
   handles: Map<
     CodexInferenceProxy,
-    { provider: string; kind: ProviderKind; modelPolicyEnforced: boolean }
+    { provider: string; kind: CodexInferenceProviderKind; modelPolicyEnforced: boolean }
   >;
   authRoute?: "apiKey" | "chatgpt";
   oauth?: CodexResponsesOAuth;
@@ -531,16 +540,6 @@ export async function prepareCodexInferenceThreadConfig(params: {
   return { route, config: projectProviderRoutes(params.config, providers), providers };
 }
 
-function responsesOAuthProvider(route: CodexInferenceProxy): JsonObject {
-  return {
-    name: "OpenClaw subscription sharing",
-    base_url: route.baseUrl,
-    wire_api: "responses",
-    requires_openai_auth: true,
-    supports_websockets: false,
-  };
-}
-
 /** Validate the exact private handle and unchanged upstream, not a localhost string exception. */
 export function assertCodexInferenceRouteConfig(
   client: CodexAppServerClient,
@@ -600,100 +599,6 @@ export function assertCodexInferenceRouteConfig(
     }
     sibling.assertCurrent();
   }
-}
-
-function providerKind(name: unknown): ProviderKind | undefined {
-  if (name === "Amazon Bedrock" || name === "Amazon Bedrock Runtime") {
-    return undefined;
-  }
-  return name === "OpenAI"
-    ? "openai"
-    : typeof name === "string" && name.toLowerCase() === "azure"
-      ? "azure"
-      : "other";
-}
-
-function hasProviderAws(config: JsonObject | undefined, provider: string): boolean {
-  return (
-    readProviderField(config, provider, "aws") != null ||
-    Object.keys(config ?? {}).some((key) => key.startsWith(`model_providers.${provider}.aws.`))
-  );
-}
-
-function configuredProviders(...configs: (JsonObject | undefined)[]): Set<string> {
-  const providers = new Set(["openai"]);
-  for (const config of configs) {
-    for (const provider of Object.keys(
-      isJsonObject(config?.model_providers) ? config.model_providers : {},
-    )) {
-      providers.add(provider);
-    }
-    for (const key of Object.keys(config ?? {})) {
-      const provider = /^model_providers\.([^.]+)(?:\.|$)/.exec(key)?.[1];
-      if (provider) {
-        providers.add(provider);
-      }
-    }
-  }
-  return providers;
-}
-
-function projectProviderRoutes(
-  config: JsonObject | undefined,
-  providers: CodexInferenceProviderRoutes,
-): JsonObject {
-  let projected = config ?? {};
-  for (const [provider, route] of providers) {
-    projected = withProviderBaseUrl(projected, provider, route.baseUrl);
-  }
-  return projected;
-}
-
-function readProviderBaseUrl(config: JsonObject | undefined, provider: string): unknown {
-  if (provider === "openai") {
-    return config?.openai_base_url;
-  }
-  return readProviderField(config, provider, "base_url");
-}
-
-function readProviderField(
-  config: JsonObject | undefined,
-  provider: string,
-  field: string,
-): unknown {
-  const providers = isJsonObject(config?.model_providers) ? config.model_providers : undefined;
-  const selected = providers?.[provider];
-  const flat = config?.[`model_providers.${provider}`];
-  return (
-    config?.[`model_providers.${provider}.${field}`] ??
-    (isJsonObject(flat) ? flat[field] : undefined) ??
-    (isJsonObject(selected) ? selected[field] : undefined)
-  );
-}
-
-function withProviderBaseUrl(
-  config: JsonObject | undefined,
-  provider: string,
-  baseUrl: string,
-): JsonObject {
-  if (provider === "openai") {
-    return { ...config, openai_base_url: baseUrl };
-  }
-  const providers = isJsonObject(config?.model_providers) ? config.model_providers : {};
-  const selected = providers[provider];
-  const providerKey = `model_providers.${provider}`;
-  const baseUrlKey = `${providerKey}.base_url`;
-  const flat = config?.[providerKey];
-  // A sparse native table overlay changes only this URL; native still owns auth and headers.
-  return {
-    ...config,
-    model_providers: {
-      ...providers,
-      [provider]: { ...(isJsonObject(selected) ? selected : {}), base_url: baseUrl },
-    },
-    ...(isJsonObject(flat) ? { [providerKey]: { ...flat, base_url: baseUrl } } : {}),
-    ...(config?.[baseUrlKey] !== undefined ? { [baseUrlKey]: baseUrl } : {}),
-  };
 }
 
 export function bindCodexInferenceThread(
