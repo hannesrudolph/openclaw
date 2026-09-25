@@ -10,6 +10,7 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
+import { registerWorkspaceBootstrapTests } from "./workspace-bootstrap.test-utils.js";
 import {
   LEGACY_WORKSPACE_ATTESTATION_HEADER,
   LEGACY_WORKSPACE_STATE_CURRENT_FILENAME,
@@ -955,3 +956,5 @@ describe("ensureAgentWorkspace", () => {
     }
   });
 });
+
+registerWorkspaceBootstrapTests();

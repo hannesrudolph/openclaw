@@ -1,7 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
-import { vi } from "vitest";
 import type { ProviderPlugin } from "../plugins/types.js";
-import type { ApplyAuthChoiceParams } from "./auth-choice.apply.types.js";
 
 export const LOCAL_PROVIDER_ID = "local-provider";
 export const LOCAL_PROVIDER_LABEL = "Local Provider";
@@ -9,7 +7,6 @@ export const LOCAL_AUTH_METHOD_ID = "local";
 export const LOCAL_PROFILE_ID = `${LOCAL_PROVIDER_ID}:default`;
 export const LOCAL_API_KEY = "local-provider-key";
 export const LOCAL_DEFAULT_MODEL = `${LOCAL_PROVIDER_ID}/demo-model`;
-export const EXISTING_DEFAULT_MODEL = "amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0";
 
 export function buildProvider(): ProviderPlugin {
   return {
@@ -56,19 +53,6 @@ export function buildProviderWithDefaultModelPatch(): ProviderPlugin {
     },
   });
   return provider;
-}
-
-export function buildParams(overrides: Partial<ApplyAuthChoiceParams> = {}): ApplyAuthChoiceParams {
-  return {
-    authChoice: LOCAL_PROVIDER_ID,
-    config: {},
-    prompter: {
-      note: vi.fn(async () => {}),
-    } as unknown as ApplyAuthChoiceParams["prompter"],
-    runtime: {} as ApplyAuthChoiceParams["runtime"],
-    setDefaultModel: true,
-    ...overrides,
-  };
 }
 
 export function buildLocalProviderInstallCatalogEntry() {

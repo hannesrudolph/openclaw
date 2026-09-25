@@ -1,32 +1,56 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { oidcIdentity } from "./credential-fixtures.test-support.js";
+import { withEnvAsync } from "../../test-utils/env.js";
+import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
+import {
+  createOAuthRefreshCredential as createCredential,
+  oauthRefreshReplacementCases,
+  oauthRefreshFailureFallbackCases,
+} from "./credential-fixtures.test-support.js";
 import { inlineAuthProfileCredentialSchema } from "./credential-schema.js";
+import { testing as externalAuthTesting } from "./external-auth.test-support.js";
 import { createOAuthManager } from "./oauth-manager.js";
 import { withOAuthProfileLock } from "./oauth-profile-lock.js";
 import { OAuthManagerRefreshError } from "./oauth-refresh-failure.js";
 import { refreshSerializedOAuthCredential } from "./oauth-refresh-fence.js";
-import {
-  createCredential,
-  FORCED_REFRESH_FAILURE_CASES,
-  withOAuthTempRoot,
-} from "./oauth-refresh-fence.test-support.js";
 import {
   createFailedOAuthRefreshFence,
   createOAuthRefreshFence,
   isPendingOAuthRefreshFence,
 } from "./oauth-refresh-marker.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
+import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 import * as authProfileStoreRuntime from "./store-runtime.js";
 import type { OAuthCredential } from "./types.js";
 import { persistAuthProfileBatch } from "./upsert-with-lock.js";
 
 const { ensureAuthProfileStoreWithoutExternalProfiles, saveAuthProfileStore } =
   authProfileStoreRuntime;
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+async function withOAuthTempRoot(
+  prefix: string,
+  run: (tempRoot: string) => Promise<void>,
+): Promise<void> {
+  const tempRoot = tempDirs.make(prefix);
+  await withEnvAsync({ OPENCLAW_STATE_DIR: tempRoot }, async () => await run(tempRoot));
+}
+
+afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  externalAuthTesting.resetResolveExternalAuthProfilesForTest();
+  clearRuntimeAuthProfileStoreSnapshots();
+  for (const stateDir of tempDirs.dirs) {
+    await cleanupSessionStateForTest({ stateDir });
+  }
+});
 
 describe("OAuth refresh generation fence", () => {
   it("keeps serialized provider I/O outside locks and settles after observer timeout", async () => {
@@ -468,36 +492,7 @@ describe("OAuth refresh generation fence", () => {
     },
   );
 
-  it.each([
-    {
-      kind: "account mismatch",
-      identity: { accountId: "acct-a" },
-      replacementIdentity: { accountId: "acct-b" },
-      sameIdentity: false,
-      coldObserver: false,
-    },
-    {
-      kind: "OIDC match",
-      identity: oidcIdentity(),
-      replacementIdentity: oidcIdentity(),
-      sameIdentity: true,
-      coldObserver: false,
-    },
-    {
-      kind: "OIDC cold mismatch",
-      identity: oidcIdentity(),
-      replacementIdentity: oidcIdentity({ sub: "subject-b" }),
-      sameIdentity: false,
-      coldObserver: true,
-    },
-    {
-      kind: "OIDC cold observer",
-      identity: oidcIdentity(),
-      replacementIdentity: oidcIdentity(),
-      sameIdentity: true,
-      coldObserver: true,
-    },
-  ])("settles owner and observer for $kind", async (row) => {
+  it.each(oauthRefreshReplacementCases())("settles owner and observer for $kind", async (row) => {
     const { identity, replacementIdentity, sameIdentity, coldObserver } = row;
     await withOAuthTempRoot("openclaw-oauth-account-replacement-", async () => {
       const profileId = "openai:default";
@@ -903,7 +898,7 @@ describe("OAuth refresh generation fence", () => {
     });
   });
 
-  it.each(FORCED_REFRESH_FAILURE_CASES)(
+  it.each(oauthRefreshFailureFallbackCases())(
     "$name after a forced refresh failure",
     async ({ candidate, expectedApiKey, buildError }) => {
       await withOAuthTempRoot("oauth-manager-force-fallback-", async (tempRoot) => {

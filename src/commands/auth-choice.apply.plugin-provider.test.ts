@@ -17,18 +17,16 @@ import { createColdPluginFixture } from "../plugins/test-helpers/cold-plugin-fix
 import type { ProviderPlugin, ProviderAuthMethod } from "../plugins/types.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import {
-  buildInstalledLocalProviderPluginResult,
-  buildLocalProviderInstallCatalogEntry,
-  buildParams,
-  buildProvider,
-  buildProviderWithDefaultModelPatch,
-  EXISTING_DEFAULT_MODEL,
-  LOCAL_API_KEY,
-  LOCAL_AUTH_METHOD_ID,
-  LOCAL_DEFAULT_MODEL,
-  LOCAL_PROFILE_ID,
   LOCAL_PROVIDER_ID,
   LOCAL_PROVIDER_LABEL,
+  LOCAL_AUTH_METHOD_ID,
+  LOCAL_PROFILE_ID,
+  LOCAL_API_KEY,
+  LOCAL_DEFAULT_MODEL,
+  buildProvider,
+  buildProviderWithDefaultModelPatch,
+  buildLocalProviderInstallCatalogEntry,
+  buildInstalledLocalProviderPluginResult,
 } from "./auth-choice.apply.plugin-provider.test-support.js";
 import type { ApplyAuthChoiceParams } from "./auth-choice.apply.types.js";
 
@@ -160,6 +158,8 @@ vi.mock("../wizard/setup.post-install-migration.js", () => ({
   offerPostInstallMigrations,
 }));
 
+const EXISTING_DEFAULT_MODEL = "amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0";
+
 function expectPersistedProfile(profileId: string, credential: AuthProfileCredential): void {
   expect(persistAuthProfileBatch).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -167,6 +167,19 @@ function expectPersistedProfile(profileId: string, credential: AuthProfileCreden
       agentDir: "/tmp/agent",
     }),
   );
+}
+
+function buildParams(overrides: Partial<ApplyAuthChoiceParams> = {}): ApplyAuthChoiceParams {
+  return {
+    authChoice: LOCAL_PROVIDER_ID,
+    config: {},
+    prompter: {
+      note: vi.fn(async () => {}),
+    } as unknown as ApplyAuthChoiceParams["prompter"],
+    runtime: {} as ApplyAuthChoiceParams["runtime"],
+    setDefaultModel: true,
+    ...overrides,
+  };
 }
 
 describe("applyAuthChoiceLoadedPluginProvider", () => {
