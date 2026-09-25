@@ -30,7 +30,7 @@ import {
   OVERLOAD_HEADERS,
   rejectBusyUpgrade,
   relayHeaders,
-} from "./inference-proxy-headers.js";
+} from "./inference-proxy-http.js";
 import {
   createUploadAdmission,
   MAX_BODY_BYTES,
@@ -48,6 +48,7 @@ const MAX_RESIDENTS = MAX_WEBSOCKETS + MAX_UPLOADS;
 const REQUEST_TIMEOUT_MS = 30_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const IDLE_WEBSOCKET_MS = 60_000;
+
 type ResidentTicket = {
   signal: AbortSignal;
   deadlineAtMs: number;

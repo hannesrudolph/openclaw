@@ -6,8 +6,6 @@ import {
   CODEX_SESSION_OVERRIDABLE_LAYER_TYPES,
   readCodexEffectiveConfig,
 } from "./config-layer-policy.js";
-import type { CodexInferenceProxy } from "./inference-proxy.js";
-import type { CodexInferenceThreadQualification } from "./inference-qualification.js";
 import {
   configuredProviders,
   hasProviderAws,
@@ -15,10 +13,11 @@ import {
   providerKind,
   readProviderBaseUrl,
   readProviderField,
-  responsesOAuthProvider,
   withProviderBaseUrl,
-  type CodexInferenceProviderKind,
-} from "./inference-routing-config.js";
+  type ProviderKind,
+} from "./inference-provider-config.js";
+import type { CodexInferenceProxy } from "./inference-proxy.js";
+import type { CodexInferenceThreadQualification } from "./inference-qualification.js";
 import { isJsonObject, type CodexConfigReadResponse, type JsonObject } from "./protocol.js";
 import { CODEX_RESPONSES_OAUTH_PROVIDER, type CodexResponsesOAuth } from "./responses-oauth.js";
 import type { CodexAppServerThreadBinding } from "./session-binding.js";
@@ -31,6 +30,7 @@ type ThreadRoutes = {
   providers: CodexInferenceProviderRoutes;
   qualification?: CodexInferenceThreadQualification;
 };
+
 type Owner = {
   closed: boolean;
   memoryConfigured: boolean;
@@ -38,7 +38,7 @@ type Owner = {
   threads: Map<string, ThreadRoutes>;
   handles: Map<
     CodexInferenceProxy,
-    { provider: string; kind: CodexInferenceProviderKind; modelPolicyEnforced: boolean }
+    { provider: string; kind: ProviderKind; modelPolicyEnforced: boolean }
   >;
   authRoute?: "apiKey" | "chatgpt";
   oauth?: CodexResponsesOAuth;
@@ -538,6 +538,16 @@ export async function prepareCodexInferenceThreadConfig(params: {
     }
   }
   return { route, config: projectProviderRoutes(params.config, providers), providers };
+}
+
+function responsesOAuthProvider(route: CodexInferenceProxy): JsonObject {
+  return {
+    name: "OpenClaw subscription sharing",
+    base_url: route.baseUrl,
+    wire_api: "responses",
+    requires_openai_auth: true,
+    supports_websockets: false,
+  };
 }
 
 /** Validate the exact private handle and unchanged upstream, not a localhost string exception. */
