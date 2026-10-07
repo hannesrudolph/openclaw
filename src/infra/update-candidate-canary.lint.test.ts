@@ -26,6 +26,7 @@ import {
   renderSteps,
   stubHealthyGateway,
 } from "./update-candidate-canary.test-support.js";
+import { UPDATE_DOCTOR_BUDGET_ENV } from "./update-doctor-budget.js";
 import { writeUpdateRunReportArtifact } from "./update-failure-report-artifact.js";
 import { createUpdateRun, finishUpdateRun, recordUpdateRunStep } from "./update-run-ledger.js";
 import { renderUpdateRunReport, updateRunReportInputFromResult } from "./update-run-report.js";
@@ -111,6 +112,65 @@ afterEach(() => {
 });
 
 describe("update candidate Doctor lint", () => {
+  it("hands each Doctor its existing command clock after slow preparation, without leaking it to other phases", async () => {
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    let snapshotFinishedAt = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const commands: Array<{ args: string[]; budget: string | undefined }> = [];
+    const spawnNormally = mocks.spawn.getMockImplementation()!;
+    mocks.spawn.mockImplementation(
+      (command, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+        commands.push({ args, budget: options.env[UPDATE_DOCTOR_BUDGET_ENV] });
+        if (args.includes("--fix")) {
+          offset += 20_000;
+        }
+        return spawnNormally(command, args, options);
+      },
+    );
+    stubHealthyGateway();
+    try {
+      const result = await validateUpdateCandidateCanary({
+        ...canaryStateOptions(300_000),
+        env: { [UPDATE_DOCTOR_BUDGET_ENV]: "stale inherited clock" },
+        onStep: (step) => {
+          if (step.name === "candidate-state-snapshot") {
+            // Preparation/receipt work is outside the separately bounded snapshot.
+            offset += 400_000;
+            snapshotFinishedAt = Date.now();
+          }
+        },
+      });
+      expect(result.status, JSON.stringify(result)).toBe("ok");
+      const doctors = commands.filter(({ args }) => args.includes("doctor"));
+      expect(doctors).toHaveLength(2);
+      const [repair, lint] = doctors.map(({ budget }) => JSON.parse(budget!));
+      for (const budget of [repair, lint]) {
+        expect(budget).toMatchObject({ version: 1, phase: "validation" });
+        expect(budget.startedAtMs).toBeGreaterThanOrEqual(snapshotFinishedAt);
+        expect(budget.workDeadlineMs - budget.startedAtMs).toBe(298_000);
+      }
+      expect(lint.startedAtMs - repair.startedAtMs).toBeGreaterThanOrEqual(20_000);
+      expect(
+        commands
+          .filter(({ args }) => !args.includes("doctor"))
+          .every(({ budget }) => budget === undefined),
+      ).toBe(true);
+      expect(result.steps.map(({ name }) => name)).toEqual(
+        expect.arrayContaining([
+          "candidate-doctor",
+          "candidate-doctor-lint",
+          "candidate-config",
+          "candidate-plugins",
+          "candidate-recovery",
+          "candidate-gateway-startup",
+        ]),
+      );
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("preserves the supervisor refusal after a warning and successful readiness envelope", async () => {
     const reason =
       "Doctor lint settlement refused: cleanup-uncertain; disposal-requested,kill-issued-by-abort,termination=signal.";

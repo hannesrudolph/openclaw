@@ -32,6 +32,7 @@ import {
   prepareUpdateCandidateRehearsal,
   type UpdateCandidateRehearsal,
 } from "./update-candidate-rehearsal.js";
+import { buildUpdateDoctorBudgetEnv } from "./update-doctor-budget.js";
 import type { UpdateDoctorConfigChange } from "./update-doctor-config.js";
 import {
   applyUpdateDoctorLintReport,
@@ -310,6 +311,7 @@ export async function validateUpdateCandidateCanary(params: {
       env.OPENCLAW_UPDATE_IN_PROGRESS = phase === "doctor" ? "1" : "0";
       await beginStep({ name: command.name, command: command.args.join(" ") });
       startBudget();
+      Object.assign(env, buildUpdateDoctorBudgetEnv(phase, deadline - budget, workDeadline));
       remaining();
       const doctorResultPath =
         phase === "doctor"

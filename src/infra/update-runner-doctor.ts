@@ -1,4 +1,5 @@
 import { compareSemverStrings } from "./update-check.js";
+import { UPDATE_DOCTOR_BUDGET_ENV } from "./update-doctor-budget.js";
 
 const EXTERNAL_SERVICE_REPAIR_POLICY_MIN_VERSION = "2026.4.25-beta.1";
 
@@ -29,6 +30,8 @@ export function buildUpdateDoctorEnv(params: {
 }): NodeJS.ProcessEnv {
   return {
     OPENCLAW_UPDATE_IN_PROGRESS: "1",
+    // A new phase must not inherit another command's validation/disposal clock.
+    [UPDATE_DOCTOR_BUDGET_ENV]: undefined,
     ...(params.deferConfiguredPluginInstallRepair
       ? { OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR: "1" }
       : {}),

@@ -1,5 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  buildUpdateDoctorBudgetEnv,
+  UPDATE_DOCTOR_BUDGET_ENV,
+} from "../infra/update-doctor-budget.js";
 import { buildUpdateRehearsalPathEnv } from "../infra/update-rehearsal-paths.js";
 import { createUpdateRun, recordUpdateRunPhase } from "../infra/update-run-ledger.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
@@ -109,12 +113,15 @@ it.each(["rehearsal", "live", "partial-markers", "standalone"])(
 );
 
 it.each([
-  { agentCount: 3, phase: "validation" },
-  { agentCount: 480, phase: "validation" },
-  { agentCount: 3, phase: "activation" },
+  { agentCount: 3, phase: "validation", parent: "legacy", exhausted: false },
+  { agentCount: 480, phase: "validation", parent: "legacy", exhausted: false },
+  { agentCount: 3, phase: "activation", parent: "legacy", exhausted: false },
+  { agentCount: 3, phase: "validation", parent: "explicit", exhausted: false },
+  { agentCount: 480, phase: "validation", parent: "explicit", exhausted: false },
+  { agentCount: 3, phase: "validation", parent: "explicit", exhausted: true },
 ])(
-  "completes required repairs and reports deferred inspection for $agentCount agents during $phase",
-  async ({ agentCount, phase }) => {
+  "completes required repairs and reports deferred inspection for $agentCount agents during $phase ($parent, exhausted=$exhausted)",
+  async ({ agentCount, phase, parent, exhausted }) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const cfg: OpenClawConfig = {
         agents: {
@@ -124,7 +131,7 @@ it.each([
           ),
         },
       };
-      const env = {
+      const env: NodeJS.ProcessEnv = {
         ...state.env,
         ...(phase === "validation"
           ? buildUpdateRehearsalPathEnv(state.stateDir)
@@ -142,7 +149,17 @@ it.each([
       recordUpdateRunPhase(run.runId, "validating", {}, { env });
       closeOpenClawStateDatabaseForTest();
       // Activation has a fresh inspection window even when validation was long ago.
-      const doctorStartedAt = startedAt + (phase === "validation" ? 20_000 : 600_000);
+      const commandStartedAt =
+        startedAt + (parent === "explicit" ? 400_000 : phase === "validation" ? 20_000 : 600_000);
+      const doctorStartedAt = commandStartedAt + (exhausted ? 140_000 : 0);
+      if (parent === "explicit") {
+        env[UPDATE_DOCTOR_BUDGET_ENV] = buildUpdateDoctorBudgetEnv(
+          "doctor",
+          commandStartedAt,
+          commandStartedAt + 298_000,
+        )[UPDATE_DOCTOR_BUDGET_ENV];
+      }
+      const inspect = agentCount === 3 && !exhausted;
       observed.now = doctorStartedAt;
       observed.events = [];
       vi.spyOn(Date, "now").mockImplementation(() => observed.now);
@@ -170,15 +187,17 @@ it.each([
       expect(observed.now - doctorStartedAt).toBeLessThan(298_000);
       expect(observed.events).toEqual([
         "required-session-repair",
-        ...(agentCount === 3 ? ["auth-inspection"] : []),
+        ...(inspect ? ["auth-inspection"] : []),
         "config-write",
         "final-readiness",
       ]);
-      if (agentCount === 3) {
+      if (inspect) {
         expect(ctx.updateWarnings ?? []).toEqual([]);
       } else {
-        expect(ctx.updateWarnings).toHaveLength(32);
-        expect(ctx.updateWarnings).toContain("Prior Doctor warning 0");
+        expect(ctx.updateWarnings).toHaveLength(agentCount === 480 ? 32 : 1);
+        if (agentCount === 480) {
+          expect(ctx.updateWarnings).toContain("Prior Doctor warning 0");
+        }
         expect(ctx.updateWarnings).toContainEqual(
           expect.stringContaining("core/doctor/auth-profiles [update-inspection-deferred]"),
         );

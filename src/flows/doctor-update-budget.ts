@@ -1,6 +1,11 @@
 import { listAgentIds } from "../agents/agent-scope-config.js";
 import { isUpdateDoctorLintPass } from "../commands/doctor/shared/update-phase.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  parseUpdateDoctorValidationBudget,
+  UPDATE_DOCTOR_BUDGET_ENV,
+  UPDATE_DOCTOR_INSPECTION_WINDOW_MS,
+} from "../infra/update-doctor-budget.js";
 import { UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV } from "../infra/update-doctor-result.js";
 import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
 import type { HealthFinding } from "./health-checks.js";
@@ -16,16 +21,19 @@ export type DoctorUpdateBudget = {
   readonly inspectionDeadlineMs: number;
   readonly disposalDeadlineMs?: number;
   readonly phase: "validation" | "activation";
-  readonly source: "validation-ledger" | "activation-policy" | "unavailable-validation-origin";
+  readonly source:
+    | "parent-validation-budget"
+    | "invalid-parent-validation-budget"
+    | "validation-ledger"
+    | "activation-policy"
+    | "unavailable-validation-origin";
   readonly deferred: Map<string, HealthFinding>;
 };
 
-// Child Doctor receives no numeric parent deadline. Keep optional work within
-// half the published 9.4 default validation window (300s, 2s cleanup).
-// The ledger origin precedes the canary clock; newer parents may allow more.
-// Activation uses a fresh optional-work window, not the expired canary clock.
+// Published parents without the explicit command contract retain the conservative
+// 9.4 fallback (300s, 2s cleanup). Never re-anchor their unknown total deadline.
+// Activation uses its own optional window, not an inherited validation clock.
 const PUBLISHED_VALIDATION_WORK_MS = 298_000;
-const INSPECTION_WINDOW_MS = PUBLISHED_VALIDATION_WORK_MS / 2;
 // The measured 480-agent Doctor took 579s. Require two seconds per agent
 // before admitting a fleet inspection; this is admission, never a kill timer.
 const AGENT_INSPECTION_ALLOWANCE_MS = 2_000;
@@ -44,6 +52,36 @@ export async function resolveDoctorUpdateBudget(params: {
   if (!rehearsal && !recordedUpdateDoctor) {
     return undefined;
   }
+  const agentCount = Math.max(listAgentIds(params.cfg).length, params.preparedAgentCount ?? 0);
+  const parentValue = params.env[UPDATE_DOCTOR_BUDGET_ENV];
+  if (rehearsal && parentValue !== undefined) {
+    const parent = parseUpdateDoctorValidationBudget(parentValue);
+    const now = Date.now();
+    if (!parent || parent.startedAtMs > now) {
+      return {
+        agentCount,
+        phase: "validation",
+        inspectionDeadlineMs: now,
+        source: "invalid-parent-validation-budget",
+        deferred: new Map(),
+      };
+    }
+    return {
+      agentCount,
+      phase: "validation",
+      // Leave at least half the original work window for required checks and
+      // disposal. Child startup and nested lint workers cannot restart this clock.
+      inspectionDeadlineMs:
+        parent.startedAtMs +
+        Math.min(
+          UPDATE_DOCTOR_INSPECTION_WINDOW_MS,
+          Math.floor((parent.workDeadlineMs - parent.startedAtMs) / 2),
+        ),
+      disposalDeadlineMs: parent.workDeadlineMs,
+      source: "parent-validation-budget",
+      deferred: new Map(),
+    };
+  }
   const { listUpdateRunsAsync } = await import("../infra/update-run-reader.js");
   let validationStartedAt: number | undefined;
   try {
@@ -60,7 +98,7 @@ export async function resolveDoctorUpdateBudget(params: {
     return undefined;
   }
   return {
-    agentCount: Math.max(listAgentIds(params.cfg).length, params.preparedAgentCount ?? 0),
+    agentCount,
     phase: rehearsal ? "validation" : "activation",
     ...(rehearsal && validationStartedAt !== undefined
       ? { disposalDeadlineMs: validationStartedAt + PUBLISHED_VALIDATION_WORK_MS }
@@ -68,8 +106,8 @@ export async function resolveDoctorUpdateBudget(params: {
     inspectionDeadlineMs: rehearsal
       ? validationStartedAt === undefined
         ? Date.now()
-        : validationStartedAt + INSPECTION_WINDOW_MS
-      : Date.now() + INSPECTION_WINDOW_MS,
+        : validationStartedAt + UPDATE_DOCTOR_INSPECTION_WINDOW_MS
+      : Date.now() + UPDATE_DOCTOR_INSPECTION_WINDOW_MS,
     source: !rehearsal
       ? "activation-policy"
       : validationStartedAt === undefined

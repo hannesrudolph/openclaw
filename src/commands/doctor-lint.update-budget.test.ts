@@ -5,6 +5,10 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { clearHealthChecksForTest } from "../flows/health-check-registry.js";
 import type { DoctorHealthCheck } from "../flows/health-check-runner-types.js";
 import { parseReleasedDoctorLintReport } from "../infra/test-fixtures/update-doctor-lint.v2026-9-5.js";
+import {
+  buildUpdateDoctorBudgetEnv,
+  UPDATE_DOCTOR_BUDGET_ENV,
+} from "../infra/update-doctor-budget.js";
 import { buildUpdateRehearsalPathEnv } from "../infra/update-rehearsal-paths.js";
 import { createUpdateRun, recordUpdateRunPhase } from "../infra/update-run-ledger.js";
 import { buildUpdateDoctorEnv } from "../infra/update-runner-doctor.js";
@@ -79,6 +83,12 @@ async function runLintFixture(
   agentCount: number,
   options: DoctorLintCliOptions = {},
   copied = true,
+  timing: {
+    parent?: "explicit";
+    preparationMs?: number;
+    childStartupMs?: number;
+    workMs?: number;
+  } = {},
 ) {
   const processTempDir = os.tmpdir();
   return withOpenClawTestState({ scenario: "minimal" }, async (state) => {
@@ -92,7 +102,7 @@ async function runLintFixture(
       plugins: { enabled: false },
     };
     await state.writeConfig(cfg);
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...state.env,
       ...(copied ? buildUpdateRehearsalPathEnv(state.stateDir) : {}),
       ...buildUpdateDoctorEnv({
@@ -106,6 +116,11 @@ async function runLintFixture(
       OPENCLAW_COMPATIBILITY_HOST_VERSION: undefined,
       OPENCLAW_UPDATE_POST_CORE_CONVERGENCE: undefined,
     };
+    if (!copied && timing.parent === "explicit") {
+      env.OPENCLAW_UPDATE_IN_PROGRESS = "1";
+      env.OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE = "1";
+      env.OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH = state.path("doctor-result.json");
+    }
     const startedAt = Date.now();
     const run = createUpdateRun(
       { trigger: "cli", target: { kind: "package" }, before: { version: "2026.9.4" } },
@@ -122,7 +137,16 @@ async function runLintFixture(
         vi.stubEnv(key, value);
       }
     }
-    observed.now = startedAt + 20_000;
+    const commandStartedAt = startedAt + (timing.preparationMs ?? 20_000);
+    if (timing.parent === "explicit") {
+      env.OPENCLAW_UPDATE_DOCTOR_BUDGET = buildUpdateDoctorBudgetEnv(
+        "lint",
+        commandStartedAt,
+        commandStartedAt + (timing.workMs ?? 298_000),
+      )[UPDATE_DOCTOR_BUDGET_ENV];
+      vi.stubEnv("OPENCLAW_UPDATE_DOCTOR_BUDGET", env.OPENCLAW_UPDATE_DOCTOR_BUDGET);
+    }
+    observed.now = commandStartedAt + (timing.childStartupMs ?? 0);
     vi.spyOn(Date, "now").mockImplementation(() => observed.now);
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => {
       observed.reports += 1;
@@ -138,6 +162,7 @@ async function runLintFixture(
         exitCode,
         stdout: String(stdout.mock.calls.at(-1)?.[0]),
         elapsedMs: observed.now - startedAt,
+        commandElapsedMs: observed.now - commandStartedAt,
       };
     } finally {
       stdout.mockRestore();
@@ -290,3 +315,86 @@ it.each(["rehearsal", "standalone", "selected", "required-error", "plugin-error"
     }
   },
 );
+
+it("runs candidate lint after slow preparation within the explicit parent command budget", async () => {
+  const result = await runLintFixture(3, {}, true, {
+    parent: "explicit",
+    preparationMs: 400_000,
+    childStartupMs: 5_000,
+  });
+  const report = parseReleasedDoctorLintReport(result.stdout);
+  expect(result.exitCode).toBe(0);
+  expect(report.checksRun).toBe(1);
+  expect(report.warnings).toEqual([
+    expect.objectContaining({ checkId: "fixture/fleet-inspection" }),
+  ]);
+  // Synthetic inspection charges three seconds; this is extra coverage, not a speedup.
+  expect(result.commandElapsedMs).toBe(8_000);
+});
+
+it.each([
+  {
+    name: "legacy parent after slow preparation",
+    parent: undefined,
+    agents: 3,
+    startup: 0,
+    work: 298_000,
+  },
+  { name: "large fleet", parent: "explicit", agents: 480, startup: 0, work: 298_000 },
+  {
+    name: "real inspection exhaustion",
+    parent: "explicit",
+    agents: 3,
+    startup: 144_000,
+    work: 298_000,
+  },
+  {
+    name: "short explicit parent deadline",
+    parent: "explicit",
+    agents: 3,
+    startup: 0,
+    work: 10_000,
+  },
+  {
+    name: "expired parent deadline",
+    parent: "explicit",
+    agents: 3,
+    startup: 300_000,
+    work: 298_000,
+  },
+] as const)(
+  "retains explicit deferred reporting for $name",
+  async ({ parent, agents, startup, work }) => {
+    const result = await runLintFixture(agents, {}, true, {
+      parent,
+      preparationMs: 400_000,
+      childStartupMs: startup,
+      workMs: work,
+    });
+    const report = parseReleasedDoctorLintReport(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(report.checksRun).toBe(0);
+    expect(report.warnings).toEqual([
+      expect.objectContaining({
+        checkId: "core/doctor/lint-inspection",
+        errorCode: "update-inspection-deferred",
+        requirement: "update-validation-budget",
+      }),
+    ]);
+    expect(result.commandElapsedMs).toBe(startup);
+  },
+);
+
+it("does not apply an inherited exhausted validation clock after activation", async () => {
+  const result = await runLintFixture(3, {}, false, {
+    parent: "explicit",
+    preparationMs: 400_000,
+    childStartupMs: 300_000,
+  });
+  const report = parseReleasedDoctorLintReport(result.stdout);
+  expect(result.exitCode).toBe(0);
+  expect(report.checksRun).toBe(1);
+  expect(report.warnings).toEqual([
+    expect.objectContaining({ checkId: "fixture/fleet-inspection" }),
+  ]);
+});

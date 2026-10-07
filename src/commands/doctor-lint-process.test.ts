@@ -10,6 +10,7 @@ import { resolveCommandProcessSignal } from "../process/exec-spawn.js";
 import { runUtf8CommandWithTimeout } from "../process/exec.js";
 import { drainProcessOutput } from "../process/output-drain.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import * as deadlines from "../utils/absolute-deadline.js";
 import { runUpdateDoctorLintProcess } from "./doctor-lint-process.js";
 
 vi.mock("../process/exec.js", () => ({ runUtf8CommandWithTimeout: vi.fn() }));
@@ -217,3 +218,39 @@ it.each(["output-error", "caller-signal", "signal-barrier"] as const)(
     );
   },
 );
+
+it("caps disposal at the parent work deadline and joins worker settlement before returning", async () => {
+  const start = 1_000_000;
+  vi.spyOn(Date, "now").mockReturnValue(start);
+  let expire: (() => void) | undefined;
+  const schedule = vi
+    .spyOn(deadlines, "scheduleAbsoluteDeadline")
+    .mockImplementation((_deadline, callback) => {
+      expire = callback;
+      return () => {};
+    });
+  const worker = createDeferredCore<SpawnResult>();
+  let signal: AbortSignal | undefined;
+  vi.mocked(runUtf8CommandWithTimeout).mockImplementation((_argv, options) => {
+    assert(typeof options !== "number");
+    signal = options.signal;
+    options.onOutputChunk?.(Buffer.from(report), "stdout");
+    return worker.promise;
+  });
+  let returned = false;
+  const completion = runUpdateDoctorLintProcess({ json: true }, start + 1_000).then((code) => {
+    returned = true;
+    return code;
+  });
+  expect(schedule).toHaveBeenCalledWith(start + 1_000, expect.any(Function));
+  expire!();
+  expect(signal?.aborted).toBe(true);
+  await Promise.resolve();
+  expect(returned).toBe(false);
+  worker.resolve(
+    workerResult({ code: 1, termination: "signal", killIssuedByAbort: true, cleanup: "forced" }),
+  );
+  await expect(completion).resolves.toBe(0);
+  expect(stdout).toHaveBeenCalledExactlyOnceWith(report);
+  expect(stderr).toHaveBeenCalledWith(expect.stringContaining("Doctor disposal timed out"));
+});

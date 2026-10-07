@@ -419,6 +419,21 @@ retain their existing durability guarantees. An older installed updater keeps
 its initial snapshot behavior until you launch an update from the newer version.
 
 Database rehearsal also avoids a second full backup of each private snapshot.
+Current updaters pass each candidate Doctor command's existing absolute work
+budget to Doctor. Runtime retention, builds, and private-state preparation do
+not consume that command's optional inspection allowance. Doctor admits optional
+work only in the first half of that command window, capped at 149 seconds; startup
+time counts, and disposal stays bounded by the same parent work deadline. This
+handoff does not extend the parent's timeouts or replace required startup, data,
+configuration, plugin, or execution-approval checks.
+
+Older parents without the handoff retain their conservative validation-ledger
+fallback. Exhausted budgets still report `update-inspection-deferred` explicitly;
+a zero-check lint report is not evidence that those inspections passed. Scope-based
+advisory deferrals remain unchanged. Live post-activation Doctor does not reuse
+an expired candidate clock. Running previously budget-deferred checks can add
+validation time; this is a coverage correction, not a speed optimization.
+
 Update schema inspection and rehearsal use SQLite online backup with a pinned
 read transaction, so a busy Gateway can keep writing while the copy includes
 committed WAL data. Each acquisition makes one copy instead of retrying until
