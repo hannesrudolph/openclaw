@@ -3,19 +3,21 @@ import { supportsClaudeInHistorySystemMessages } from "@openclaw/llm-core";
 import type { SessionTranscriptRuntimeTarget } from "../../../config/sessions/session-accessor.js";
 import { OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST } from "../../../context-engine/host-compat.js";
 import type { ContextEngine } from "../../../context-engine/types.js";
-import { isRuntimeContextMessage, setRuntimeContextRetention } from "../../../llm/types.js";
 import {
   attachRuntimePromptMediaFacts,
   readPersistedMediaFacts,
 } from "../../../media/media-facts.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import type { PluginMetadataSnapshot } from "../../../plugins/plugin-metadata-snapshot.types.js";
-import { isMainSessionRestartRecoveryInputProvenance } from "../../../sessions/input-provenance.js";
+import {
+  isMainSessionRestartRecoveryInputProvenance,
+  normalizeInputProvenance,
+  shouldPreserveUserFacingSessionStateForInputProvenance,
+} from "../../../sessions/input-provenance.js";
 import type { PersistedUserTurnMessage } from "../../../sessions/user-turn-transcript.types.js";
 import { createPreparedEmbeddedAgentSettingsManager } from "../../agent-project-settings.js";
 import {
   applyAgentAutoCompactionGuard,
-  applyAgentCompactionSettingsFromConfig,
   isSilentOverflowProneModel,
   resolveEffectiveCompactionMode,
 } from "../../agent-settings.js";
@@ -32,7 +34,7 @@ import {
   SessionManager,
 } from "../../sessions/index.js";
 import { DefaultResourceLoader } from "../../sessions/resource-loader.js";
-import { createAgentSessionForEmbeddedRunner } from "../../sessions/sdk.js";
+import { createAgentSession } from "../../sessions/sdk.js";
 import { withSessionManagerWrite } from "../../sessions/session-manager-write-admission.js";
 import { wrapToolDefinition } from "../../sessions/tools/tool-definition-wrapper.js";
 import { resolveToolSearchCatalogTool } from "../../tool-search.js";
@@ -42,7 +44,6 @@ import { log } from "../logger.js";
 import { declarePromptHistoryRewrite } from "../prompt-cache-observability.js";
 import { recordRuntimeContextProjection } from "../session-prompt-state.js";
 import { resolveEmbeddedAgentApiKey } from "../stream-resolution.js";
-import { applySystemPromptToSession } from "../system-prompt.js";
 import { prepareEmbeddedAttemptClientTools } from "./attempt-client-tools.js";
 import { createAttemptCompactionThinkingResolver } from "./attempt-compaction-thinking.js";
 import { resolveAttemptTranscriptPolicy } from "./attempt-history.js";
@@ -59,13 +60,19 @@ import { buildAfterTurnRuntimeContext } from "./attempt-prompt-helpers.js";
 import { resolveExistingAttemptTranscriptState } from "./attempt-transcript-helpers.js";
 import type { EmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle.js";
 import { createUserTranscriptContextRegistry } from "./attempt-user-transcript-context-registry.js";
-import { installMessageToolOnlyTerminalHook } from "./message-tool-terminal.js";
+import {
+  installMessageToolOnlyTerminalHook,
+  installToolAuthoredSourceReplyTerminalHook,
+} from "./message-tool-terminal.js";
 import {
   type InitialUserTurnReplayPreparation,
   preparePersistedCurrentUserTurn,
   reconcilePrePersistedCurrentUserTurn,
 } from "./pre-persisted-user-turn.js";
-import { setSteeringRuntimeContextRetention } from "./runtime-context-prompt.js";
+import {
+  applyRuntimeContextCarrierRetention,
+  setSteeringRuntimeContextRetention,
+} from "./runtime-context-prompt.js";
 import { resolveSessionBoundaryPromptCacheKey } from "./session-boundary-prompt-cache-key.js";
 import { resolveEmbeddedSessionContextLimits } from "./session-context-limits.js";
 import { withEmbeddedAttemptToolActivity } from "./tool-activity-heartbeat.js";
@@ -109,7 +116,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     pluginMetadataSnapshot: input.getCurrentAttemptPluginMetadataSnapshot(),
     contextTokenBudget: attempt.contextTokenBudget,
   });
-  const autoCompactionGuardArgs = {
+  applyAgentAutoCompactionGuard({
     settingsManager,
     contextEngineInfo: input.activeContextEngineInfo,
     compactionMode: resolveEffectiveCompactionMode(attempt.config),
@@ -118,8 +125,9 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
       modelId: attempt.modelId,
       baseUrl: attempt.model.baseUrl ?? undefined,
     }),
-  };
-  applyAgentAutoCompactionGuard(autoCompactionGuardArgs);
+    // The finalizer's result gate rejects any compaction, so never start one.
+    compactionForbidden: attempt.operation === "settled-tool-finalization",
+  });
 
   // These factories carry compaction/pruning runtime state into the resource loader.
   const extensionFactories = buildEmbeddedExtensionFactories({
@@ -137,18 +145,9 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.effectiveCwd,
     agentDir: input.agentDir,
-    settingsManager,
     extensionFactories,
   });
   await resourceLoader.reload();
-  // reload() rehydrates disk settings. Reapply OpenClaw's context budget and
-  // auto-compaction guards before the session can submit a prompt (#75799).
-  applyAgentCompactionSettingsFromConfig({
-    settingsManager,
-    cfg: attempt.config,
-    contextTokenBudget: attempt.contextTokenBudget,
-  });
-  applyAgentAutoCompactionGuard(autoCompactionGuardArgs);
   input.markStage("session-resource-loader");
 
   // Tool creation needs the same runner later used by lifecycle hooks.
@@ -159,10 +158,9 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   });
   const { allCustomTools, sessionToolAllowlist, ...clientToolRuntime } = preparedClientTools;
 
-  const sessionOptions: CreateAgentSessionOptions = {
+  const { session: activeSession } = await createAgentSession({
+    systemPrompt: input.initialSystemPrompt,
     cwd: input.effectiveCwd,
-    agentDir: input.agentDir,
-    authStorage: attempt.authStorage,
     modelRegistry: attempt.modelRegistry,
     model: attempt.model,
     thinkingLevel: input.agentCoreThinkingLevel,
@@ -209,8 +207,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
       : undefined,
     withSessionWriteSettlement: (operation) =>
       input.transcriptLifecycle.withTranscriptWrite(operation),
-  };
-  const { session: activeSession } = await createAgentSessionForEmbeddedRunner(sessionOptions, {
+    cleanupProviderSessionResourcesOnDispose: false,
     // Without a resolved model budget, the outer loop cannot own bounded recovery.
     contextOverflowRecoveryOwner: attempt.contextTokenBudget === undefined ? "session" : "caller",
     resolveCompactionThinkingLevel: createAttemptCompactionThinkingResolver(
@@ -228,7 +225,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   activeSession.setActiveToolsByName(sessionToolAllowlist);
   const setActiveSessionSystemPrompt = (nextSystemPrompt: string) => {
     input.onSystemPromptChanged(nextSystemPrompt);
-    applySystemPromptToSession(activeSession, nextSystemPrompt);
+    activeSession.setBaseSystemPrompt(nextSystemPrompt.trim());
     return nextSystemPrompt;
   };
   const setPermissionPromptPreparation = installAttemptPermissionPrompt({
@@ -258,6 +255,10 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     replyToMode: attempt.replyToMode,
     hasRepliedRef: attempt.hasRepliedRef,
     sessionKey: attempt.sessionKey,
+  });
+  installToolAuthoredSourceReplyTerminalHook({
+    agent: activeSession.agent,
+    sourceReplyCapableToolNames: clientToolRuntime.sourceReplyCapableToolNames,
   });
   input.markStage("agent-session");
 
@@ -351,7 +352,16 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
       durableUserTurnMessage: orphanRepairCandidate?.messageEntry.message,
       userTurnAlreadyPersisted: attempt.userTurnTranscriptRecorder?.hasPersisted() === true,
     });
-  const orphanRepair = reconciledCurrentUser ? undefined : orphanRepairCandidate;
+  const orphanProvenance = normalizeInputProvenance(
+    orphanRepairCandidate?.messageEntry.message.provenance,
+  );
+  // A failed user dispatch can leave the next continuation an unanswered user.
+  // Keep that input in user history instead of reclassifying it as announcement context.
+  const preserveUnansweredUser =
+    shouldPreserveUserFacingSessionStateForInputProvenance(attempt.inputProvenance) &&
+    (!orphanProvenance || orphanProvenance.kind === "external_user");
+  const orphanRepair =
+    reconciledCurrentUser || preserveUnansweredUser ? undefined : orphanRepairCandidate;
   if (orphanRepair?.removeLeaf) {
     const repairedTarget = await withSessionManagerWrite(sessionManager, async () => {
       input.abortSignal?.throwIfAborted();
@@ -399,7 +409,6 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   const boundaryTimezone = preserveExactPrompt
     ? undefined
     : resolveUserTimezone(attempt.config?.agents?.defaults?.userTimezone);
-  const includeBoundaryTimestamp = !preserveExactPrompt;
   let currentUserTimestampOverride: CurrentUserTimestampOverride | undefined;
   const buildBoundaryOptions = (): LlmBoundaryOptions => {
     if (preserveExactPrompt) {
@@ -436,11 +445,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
         ? normalized
         : relocateCurrentRuntimeContextCarrierToTail(normalized),
     );
-    for (const message of converted) {
-      if (isRuntimeContextMessage(message)) {
-        setRuntimeContextRetention(message, input.appendOnlyRuntimeContext);
-      }
-    }
+    applyRuntimeContextCarrierRetention(converted, input.appendOnlyRuntimeContext);
     if (
       !input.appendOnlyRuntimeContext &&
       recordRuntimeContextProjection(attempt.sessionId, removedRuntimeContext, converted)
@@ -452,7 +457,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
 
   return {
     boundaryTimezone,
-    includeBoundaryTimestamp,
+    includeBoundaryTimestamp: !preserveExactPrompt,
     orphanRepair,
     setCurrentUserTimestampOverride: (override) => {
       currentUserTimestampOverride = override;
@@ -638,15 +643,8 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
       degradedReason: attempt.degradedReason,
       runMaintenance: async (contextParams) =>
         await runContextEngineMaintenance({
-          contextEngine: contextParams.contextEngine as never,
-          sessionId: contextParams.sessionId,
-          sessionKey: contextParams.sessionKey,
-          sessionTarget: contextParams.sessionTarget,
-          sessionFile: contextParams.sessionFile,
-          reason: contextParams.reason,
+          ...contextParams,
           sessionManager: contextParams.sessionManager as never,
-          runtimeContext: contextParams.runtimeContext,
-          runtimeSettings: contextParams.runtimeSettings,
           config: attempt.config,
           agentId: input.sessionAgentId,
           contextEngineAgentId: attempt.contextEngineAgentId,

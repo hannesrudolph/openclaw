@@ -6,7 +6,6 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 // Agent via gateway tests cover gateway-backed agent command dispatch and session loading.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { GatewayPendingRequests } from "../../packages/gateway-client/src/pending-request.js";
 import { GatewayClientRequestError } from "../../packages/gateway-client/src/request-error.js";
 import {
   configureExecutionIdentityAdmissionSink,
@@ -29,6 +28,7 @@ import {
   createGatewayNormalCloseError,
   createGatewayTimeoutError,
   createLocalGatewayLockOptions,
+  settleGatewayAgentRequest,
 } from "./agent-via-gateway.test-support.js";
 import type { agentCommand as AgentCommand } from "./agent.js";
 
@@ -290,7 +290,6 @@ function resetAgentCliCommandMocksForTest() {
   startOneShotDiagnosticsExporters.mockReset();
   startOneShotDiagnosticsExporters.mockResolvedValue(null);
   vi.stubEnv("OPENCLAW_GATEWAY_URL", "");
-  agentViaGatewayTesting.resetLazyImportsForTests();
   agentViaGatewayTesting.setGatewayAbortRetryDelaysMsForTests([0, 0, 0, 0]);
   // Each test observes a fresh mock generation, even after the real module was
   // warmed; a single hoisted factory would hide later unexpected imports.
@@ -1874,75 +1873,65 @@ describe("agentCliCommand", () => {
     }
   });
 
-  it("stays silent when the gateway returns an intentional empty reply", async () => {
-    await withTempStore(async () => {
-      callGateway.mockResolvedValue({
-        runId: "idem-1",
-        status: "ok",
-        summary: "completed",
-        result: {
-          payloads: [],
-          meta: { stub: true },
-        },
-      });
-
-      await agentCliCommand({ message: "hi", to: "+1555" }, runtime);
-
-      expect(runtime.log).not.toHaveBeenCalled();
-    });
-  });
-
-  it.each(["timeout", "error"])(
-    "logs an empty-payload %s summary and marks the process unsuccessful",
-    async (status) => {
+  it.each([
+    { status: "ok", json: false, ok: true, withdrawn: false },
+    { status: "timeout", json: false, ok: true, withdrawn: false },
+    { status: "error", json: false, ok: true, withdrawn: false },
+    { status: "cancelled", json: true, ok: true, withdrawn: false },
+    { status: "timeout", json: true, ok: true, withdrawn: true },
+    { status: "timeout", json: false, ok: true, withdrawn: true },
+    { status: "timeout", json: true, ok: false, withdrawn: true },
+    { status: "timeout", json: false, ok: false, withdrawn: true },
+  ])(
+    "renders $status with json=$json, RPC ok=$ok, withdrawn=$withdrawn",
+    async ({ status, json, ok, withdrawn }) => {
       await withTempStore(async () => {
         const signals = createSignalProcess();
-        callGateway.mockResolvedValue({
+        const response = {
           runId: "idem-1",
           status,
-          summary: status,
+          summary: withdrawn ? "Input was not delivered. Raise --timeout and retry." : status,
+          ...(withdrawn
+            ? { reason: "input_withdrawn_before_turn", pendingInputId: "withdrawn-input" }
+            : {}),
           result: {
-            payloads: [],
+            payloads:
+              status === "cancelled" ? [{ text: "Agent did not complete", isError: true }] : [],
             meta: { stopReason: status },
           },
-        });
+        };
+        callGateway.mockImplementation(() =>
+          settleGatewayAgentRequest({
+            response: {
+              ok,
+              payload: response,
+              ...(ok ? {} : { error: { code: "UNAVAILABLE", message: "deadline elapsed" } }),
+            },
+          }),
+        );
 
-        await agentCliCommand({ message: "hi", to: "+1555" }, runtime, {
+        await agentCliCommand({ message: "hi", to: "+1555", json }, jsonRuntime, {
           process: signals.processLike,
         });
 
-        expect(runtime.log).toHaveBeenCalledWith(status);
-        expect(runtime.exit).not.toHaveBeenCalled();
-        expect(signals.processLike.exitCode).toBe(1);
+        expect(signals.processLike.exitCode).toBe(status === "ok" ? 0 : 1);
+        expect(jsonRuntime.exit).not.toHaveBeenCalled();
+        expect(jsonRuntime.log).toHaveBeenCalledTimes(
+          !json && !withdrawn && status !== "ok" ? 1 : 0,
+        );
+        if (json) {
+          expect(jsonRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(
+            { ...response, status: ok ? status : "cancelled" },
+            2,
+          );
+        } else if (status !== "ok") {
+          expect(withdrawn ? jsonRuntime.error : jsonRuntime.log).toHaveBeenCalledWith(
+            response.summary,
+          );
+        }
       });
     },
   );
-
-  it("writes a cancelled gateway result before exiting nonzero in JSON mode", async () => {
-    const status = "cancelled";
-
-    await withTempStore(async () => {
-      const signals = createSignalProcess();
-      const response = {
-        runId: "idem-1",
-        status,
-        summary: "failed",
-        result: {
-          payloads: [{ text: "Agent did not complete", isError: true }],
-          meta: { stopReason: status },
-        },
-      };
-      callGateway.mockResolvedValue(response);
-
-      await agentCliCommand({ message: "hi", to: "+1555", json: true }, jsonRuntime, {
-        process: signals.processLike,
-      });
-
-      expect(jsonRuntime.writeJson).toHaveBeenCalledWith(response, 2);
-      expect(jsonRuntime.exit).not.toHaveBeenCalled();
-      expect(signals.processLike.exitCode).toBe(1);
-    });
-  });
 
   it("surfaces duplicate in-flight gateway runs without pretending a reply arrived", async () => {
     await withTempStore(async () => {
@@ -2083,33 +2072,17 @@ describe("agentCliCommand", () => {
         });
         const signal = createSignalProcess();
         const humanBefore = formatCliFailureLines({ title: "failed", error, env: {} });
-        callGateway.mockImplementation(
-          async (request: { onAccepted?: (payload: unknown) => void }) => {
-            const pending = new GatewayPendingRequests({
-              createRequestId: () => "request",
-              nowMs: Date.now,
-              createRequestError: () => error,
-            });
-            const result = pending.request(
-              { send: () => {} },
-              "agent",
-              {},
-              { expectFinal: true, onAccepted: request.onAccepted },
-            );
-            if (accepted) {
-              pending.handleResponse({ type: "res", id: "1:request", ok: true, payload: accepted });
-            }
-            pending.handleResponse({
-              type: "res",
-              id: "1:request",
+        callGateway.mockImplementation((request: { onAccepted?: (payload: unknown) => void }) =>
+          settleGatewayAgentRequest({
+            accepted,
+            onAccepted: request.onAccepted,
+            requestError: error,
+            response: {
               ok: false,
               payload,
               error: { code: error.code, message: error.message },
-            });
-            // Bound the pre-fix negative-accepted regression without a wall-clock timeout.
-            pending.flush(error);
-            return await result;
-          },
+            },
+          }),
         );
         await expect(
           agentCliCommand(
@@ -2608,66 +2581,20 @@ describe("agentCliCommand", () => {
     expect(runtime.exit).not.toHaveBeenCalledWith(1);
   });
 
-  it("keeps a resolved session module cached until the existing lazy reset", async () => {
-    await withTempStore(async () => {
-      mockGatewaySuccessReply();
-      const run = () => agentCliCommand({ message: "hi", to: "+1555" }, runtime);
-      await expect(run()).resolves.toEqual(gatewaySuccessReply("hello"));
-      expect(loadAgentSessionModuleMock).toHaveBeenCalledOnce();
-
-      const nextGeneration = vi.fn();
-      vi.doMock("./agent/session.runtime.js", async (importOriginal) => {
-        nextGeneration();
-        return await importOriginal<typeof import("./agent/session.runtime.js")>();
-      });
-      await expect(run()).resolves.toEqual(gatewaySuccessReply("hello"));
-      expect(nextGeneration).not.toHaveBeenCalled();
-
-      agentViaGatewayTesting.resetLazyImportsForTests();
-      await expect(run()).resolves.toEqual(gatewaySuccessReply("hello"));
-      expect(nextGeneration).toHaveBeenCalledOnce();
-      expect(callGateway).toHaveBeenCalledTimes(3);
-      expect(
-        callGateway.mock.calls.map(([value]) => {
-          const request = requireRecord(value, "gateway request");
-          return requireRecord(request.params, "gateway params").sessionKey;
-        }),
-      ).toEqual(["agent:main:main", "agent:main:main", "agent:main:main"]);
-    });
-  });
-
-  it("keeps a rejected session module cached until the existing lazy reset", async () => {
+  it("stops dispatch and releases signal listeners when the session module fails to load", async () => {
     await withTempStore(async () => {
       const failure = new Error("synthetic session module load failure");
-      const rejectedGeneration = vi.fn(() => {
+      vi.doMock("./agent/session.runtime.js", () => {
         throw failure;
       });
-      vi.doMock("./agent/session.runtime.js", rejectedGeneration);
       const signals = createSignalProcess();
-      const run = () =>
+      await expect(
         agentCliCommand({ message: "hi", to: "+1555" }, runtime, {
           process: signals.processLike,
-        });
-      const firstError = await run().catch((error: unknown) => error);
-      expect(firstError).toBeInstanceOf(Error);
-      expect(firstError).toMatchObject({ cause: failure });
-      expect(rejectedGeneration).toHaveBeenCalledOnce();
-
-      const nextGeneration = vi.fn();
-      vi.doMock("./agent/session.runtime.js", async (importOriginal) => {
-        nextGeneration();
-        return await importOriginal<typeof import("./agent/session.runtime.js")>();
-      });
-      await expect(run()).rejects.toBe(firstError);
-      expect(nextGeneration).not.toHaveBeenCalled();
+        }),
+      ).rejects.toMatchObject({ cause: failure });
       expect(callGateway).not.toHaveBeenCalled();
-      expect(signals.listenerCount("SIGINT") + signals.listenerCount("SIGTERM")).toBe(0);
-
-      agentViaGatewayTesting.resetLazyImportsForTests();
-      mockGatewaySuccessReply();
-      await expect(run()).resolves.toEqual(gatewaySuccessReply("hello"));
-      expect(nextGeneration).toHaveBeenCalledOnce();
-      expect(callGateway).toHaveBeenCalledOnce();
+      expect(agentCommand).not.toHaveBeenCalled();
       expect(signals.listenerCount("SIGINT") + signals.listenerCount("SIGTERM")).toBe(0);
     });
   });

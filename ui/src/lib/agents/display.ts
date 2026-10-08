@@ -86,12 +86,7 @@ export function normalizeAgentTargetLabel(
     hydratedIdentity?.nameSource && hydratedIdentity.nameSource !== "default"
       ? normalizeOptionalString(hydratedIdentity.name)
       : undefined;
-  return (
-    resolvedName ??
-    normalizeOptionalString(agent.name) ??
-    normalizeOptionalString(agent.identity?.name) ??
-    agent.id
-  );
+  return resolvedName ?? normalizeAgentLabel(agent);
 }
 
 export function resolveAgentTextAvatar(
@@ -104,13 +99,7 @@ export function resolveAgentTextAvatar(
     normalizeOptionalString(agentIdentity?.emoji),
     normalizeOptionalString(agentIdentity?.avatar),
   ];
-  for (const candidate of candidates) {
-    const textAvatar = resolveAssistantTextAvatar(candidate);
-    if (textAvatar) {
-      return textAvatar;
-    }
-  }
-  return null;
+  return candidates.map(resolveAssistantTextAvatar).find(Boolean) ?? null;
 }
 
 type FormatBytesOptions = {

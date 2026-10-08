@@ -37,6 +37,8 @@ import {
 } from "./node-launch-adapter.js";
 import { raceNodeWorkerOperation } from "./node-worker-abort.js";
 import { nodeWorkerGatewayNamespace } from "./node-worker-gateway-namespace.js";
+import { createNodeWorkerProcessObserver } from "./node-worker-process-observation.js";
+import { parseNodeWorkerResponse } from "./node-worker-response.js";
 import {
   createNodeWorkerWorkspaceActions,
   type NodeWorkerWorkspaceBinding,
@@ -60,6 +62,7 @@ import { workerWorkspaceCommandSucceeded } from "./workspace-sync-helpers.js";
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_RESULT_GRACE_MS = 5_000;
 const RETRY_DELAY_MS = 100;
+const WORKSPACE_DIAGNOSTIC_MAX_CHARS = 500;
 const tunnelLog = createSubsystemLogger("gateway/worker-tunnel");
 
 export type NodeWorkerWorkspaceBindingResolver = (binding: {
@@ -104,17 +107,6 @@ type NodeTunnelEntry = NodeEnvironmentOwner & {
   nativeWorkspaceLeases: Set<string>;
   readiness: Deferred<WorkerTurnTunnelHandle>;
 };
-
-function payloadJson(value: string | null | undefined): unknown {
-  if (!value) {
-    throw new Error("node workspace command omitted its result");
-  }
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    throw new Error("node workspace command returned malformed JSON");
-  }
-}
 
 /** Owns node-channel handles without treating the persistent machine as a disposable lease. */
 export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOptions) {
@@ -280,7 +272,10 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         const code = result.error?.code ?? "UNAVAILABLE";
         if (code === NODE_WORKSPACE_TRANSFER_ERROR_CODE) {
           throw new NodeWorkerWorkspaceTransferError(
-            result.error?.message ?? "workspace-transfer-failed: transfer did not complete",
+            boundedWorkerError(
+              result.error?.message ?? "workspace-transfer-failed: transfer did not complete",
+              WORKSPACE_DIAGNOSTIC_MAX_CHARS,
+            ),
           );
         }
         if (
@@ -291,13 +286,13 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
           continue;
         }
         throw new Error(
-          result.error?.message && code === "INVALID_REQUEST"
-            ? `node workspace command failed (${code}): ${result.error.message}`
+          result.error?.message
+            ? `node workspace command failed (${code}): ${boundedWorkerError(result.error.message, WORKSPACE_DIAGNOSTIC_MAX_CHARS)}`
             : `node workspace command failed (${code})`,
         );
       }
       const parsed = parseNodeWorkerWorkspaceExecResult(
-        payloadJson(result.payloadJSON),
+        parseNodeWorkerResponse(result.payloadJSON, "node workspace command"),
         command.argv,
       );
       if (!parsed) {
@@ -567,6 +562,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
   }
 
   return {
+    observeProcesses: createNodeWorkerProcessObserver({ ...options, gatewayNamespace }),
     async runSessionCommand(
       binding: { environmentId: string; ownerEpoch: number; sessionId: string; sessionKey: string },
       command: WorkerWorkspaceCommand,

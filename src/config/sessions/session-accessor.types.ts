@@ -14,6 +14,7 @@ import type { SessionLifecycleStoreTarget } from "./session-accessor.lifecycle-t
 import type { SessionEntryCreationOperation } from "./session-accessor.sqlite-entry-cache.types.js";
 import type { SessionOwnerAssignment } from "./session-entry-provenance.js";
 import type { CapturedSessionEntryReadSource } from "./session-entry-read-source.types.js";
+import type { SessionEntryProjection } from "./session-entry-snapshots.js";
 import type {
   SessionLifecycleRevisionExpectation,
   SessionTranscriptTurnExpectedState,
@@ -66,8 +67,8 @@ export type LogicalSessionAccessScope = {
 };
 
 export type SessionEntryReadScope = SessionAccessScope & {
-  /** Metadata views omit the large per-run prompt snapshots before decoding. */
-  projection?: "full" | "list";
+  /** Select only required saved snapshots; list omits all of them before decoding. */
+  projection?: SessionEntryProjection;
 };
 
 export type SessionEntryReadOnlyWorkerScope = SessionEntryReadScope & {
@@ -77,10 +78,13 @@ export type SessionEntryReadOnlyWorkerScope = SessionEntryReadScope & {
   env: NodeJS.ProcessEnv;
 };
 
-export type SessionEntryListScope = Partial<Omit<SessionEntryReadScope, "sessionKey">> & {
+export type SessionEntryListScope = Partial<
+  Omit<SessionEntryReadScope, "sessionKey" | "projection">
+> & {
+  projection?: "full" | "list";
   /** Select exact persisted keys after validating the complete listing snapshot. */
   sessionKeys?: readonly string[];
-  /** Retain full cron-run entries for deletion guards, and only metadata for ordinary sessions. */
+  /** Validate the complete listing, retaining full cron-run entries for deletion guards. */
   cronRetention?: true;
   /** Validate the complete listing, retaining full expired cron rows only for this logical owner. */
   expiredCronRuns?: { agentId: string; updatedBefore: number };
@@ -339,7 +343,7 @@ export type TranscriptMessageAppendResult<TMessage> = {
 
 /** Transcript update fields supplied by callers; the target is resolved here. */
 export type TranscriptUpdatePayload = Partial<SessionTranscriptUpdate> &
-  Pick<InternalSessionTranscriptUpdate, "lifecycleRevision">;
+  Pick<InternalSessionTranscriptUpdate, "lifecycleRevision" | "assistantItemIds">;
 
 export type LatestTranscriptAssistantText = {
   id?: string;
@@ -349,12 +353,13 @@ export type LatestTranscriptAssistantText = {
 };
 
 export type SessionTranscriptWriteLockAccessorContext = {
+  publishUpdate: (update?: TranscriptUpdatePayload) => Promise<void>;
   appendMessage: <TMessage>(
-    options: TranscriptMessageAppendOptions<TMessage>,
+    options: LockedTranscriptMessageAppendOptions<TMessage>,
   ) => Promise<TranscriptMessageAppendResult<TMessage> | undefined>;
   /** Appends with commit-time idempotency and returns the committed visible sequence. */
   appendMessageWithMessageSequence: <TMessage>(
-    options: TranscriptMessageAppendOptions<TMessage>,
+    options: LockedTranscriptMessageAppendOptions<TMessage>,
   ) => Promise<{
     /** Unfenced imports omit ownership and retain canonical-history refresh. */
     lifecycleRevision?: string;
@@ -371,6 +376,16 @@ export type SessionTranscriptWriteLockAccessorContext = {
   replaceEvents: (events: readonly TranscriptEvent[]) => Promise<void>;
 };
 
+export type LockedTranscriptMessageAppendOptions<TMessage> = Omit<
+  TranscriptMessageAppendOptions<TMessage>,
+  "prepareMessageAfterIdempotencyCheck"
+> & {
+  /** @deprecated Use prepareMessageAfterIdempotencyCheckAsync outside the transaction. */
+  prepareMessageAfterIdempotencyCheck?: (message: TMessage) => TMessage | undefined;
+  /** Awaited after duplicate detection; undefined suppresses a fresh append. */
+  prepareMessageAfterIdempotencyCheckAsync?: (message: TMessage) => Promise<TMessage | undefined>;
+};
+
 /** Canonical transcript identity owned by the transaction. */
 export type SessionTranscriptWriteTransactionContext = SessionTranscriptRuntimeTarget;
 
@@ -381,7 +396,10 @@ export type SessionTranscriptTurnMessageAppend = TranscriptMessageAppendOptions<
   workerPreparation?: Pick<
     TranscriptMessageAppendOptions<unknown>,
     "prepareMessageAfterIdempotencyCheck" | "beforeFreshMessageCommit"
-  >;
+  > & {
+    /** Requires expectedSessionId and one message without transaction predicates; awaited after duplicate detection. */
+    prepareMessageAfterIdempotencyCheckAsync?: (message: unknown) => Promise<unknown>;
+  };
   predicate?:
     | { kind: "latest-assistant-differs"; runId: string; text: string }
     | { kind: "active-entry"; entryId: string; errorMessage: string };
@@ -519,11 +537,6 @@ export type SessionAbortTargetResult = SessionAbortTargetIdentity & {
   persistenceError?: string;
 };
 
-export type SessionLifecycleTranscriptInfo = {
-  sessionFile?: string;
-  transcriptArchived?: boolean;
-};
-
 export type ReplySessionInitializationSnapshot = {
   currentEntry?: SessionEntry;
   readEntry: (sessionKey: string) => SessionEntry | undefined;
@@ -540,7 +553,6 @@ export type ReplySessionInitializationCommitContext = Omit<
 export type ReplySessionInitializationCommitResult =
   | {
       ok: true;
-      previousSessionTranscript: SessionLifecycleTranscriptInfo;
       sessionEntry: SessionEntry;
       sessionStoreView: Record<string, SessionEntry>;
     }
@@ -839,17 +851,6 @@ export type SessionPatchProjectionFailure = { ok: false };
 export type SessionPatchProjectionResult<TFailure extends SessionPatchProjectionFailure> =
   | { ok: true; entry: SessionEntry }
   | TFailure;
-
-export type SessionPatchProjectionOperation<TFailure extends SessionPatchProjectionFailure> = {
-  /** Revalidates request-scoped authorization after projection and before persistence. */
-  authorize?: () => TFailure | undefined;
-  /** Converts a target-local projection exception without aborting sibling targets. */
-  onError?: (error: unknown) => TFailure;
-  resolveTarget: (snapshot: SessionPatchProjectionSnapshot) => SessionPatchProjectionTarget;
-  project: (
-    context: SessionPatchProjectionContext,
-  ) => Promise<SessionPatchProjectionResult<TFailure>> | SessionPatchProjectionResult<TFailure>;
-};
 
 export type {
   DeleteSessionEntryLifecycleParams,

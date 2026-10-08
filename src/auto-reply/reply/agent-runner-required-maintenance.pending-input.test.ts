@@ -32,7 +32,7 @@ import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-trans
 import { extractTextFromChatContent } from "../../shared/chat-content.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
-import { runReplyAgent } from "./agent-runner.js";
+import { runReplyAgent } from "./agent-runner-run.js";
 import {
   createTestFollowupRun,
   installAgentRunnerMemoryFixture,
@@ -272,13 +272,14 @@ describe("required maintenance with restart-safe admitted input", () => {
               }),
             );
           }
-          const request = createRestartSafeChatRequest({
+          const request = await createRestartSafeChatRequest({
             eligible: true,
             message: approved,
             senderIsOwner: true,
             cfg,
           });
           const restartSafeAdmission = resolveRestartSafeChatAdmission({
+            acpMeta: null,
             activeRunScopeKey: sessionKey,
             agentId: "main",
             cfg,
@@ -286,7 +287,9 @@ describe("required maintenance with restart-safe admitted input", () => {
             context: { chatAbortControllers: new Map(), chatQueuedTurns: new Map() },
             entry,
             initialSessionEntry: entry,
+            lifecycleTimestamps: undefined,
             now: Date.now(),
+            placement: undefined,
             request,
             sessionId,
             sessionKey,
@@ -302,6 +305,7 @@ describe("required maintenance with restart-safe admitted input", () => {
             },
             input: { text: approved, timestamp: Date.now(), idempotencyKey: `${runId}:user` },
             ...buildRestartSafeChatTranscriptState({
+              sourceIngress: "control-ui",
               admission: restartSafeAdmission!,
               clientRunId: runId,
               startedAt: Date.now(),

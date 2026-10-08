@@ -1,6 +1,7 @@
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { asOptionalRecord as asObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { filterStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import {
   isAcpTagVisible,
@@ -49,13 +50,6 @@ const log = createSubsystemLogger("agents/acp-parent-stream");
 type AcpParentProgressStreamingConfig = StreamingCompatEntry & {
   accounts?: Record<string, StreamingCompatEntry | undefined>;
 };
-
-function normalizeStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
-}
 
 function mergeStreamingConfig(base: unknown, override: unknown): unknown {
   const baseRecord = asObjectRecord(base);
@@ -119,6 +113,7 @@ export function startAcpSpawnParentStreamRelay(params: {
   childSessionKey: string;
   childSessionId?: string;
   agentId: string;
+  ownerAgentId?: string;
   env?: NodeJS.ProcessEnv;
   eventRouting: EventSessionRoutingPolicy;
   deliveryContext?: DeliveryContext;
@@ -137,7 +132,7 @@ export function startAcpSpawnParentStreamRelay(params: {
   try {
     if (childSessionId) {
       recorder = createAcpParentStreamRecorder({
-        agentId: params.agentId,
+        agentId: params.ownerAgentId ?? params.agentId,
         env: stateEnv,
         sessionId: childSessionId,
         runId,
@@ -408,13 +403,7 @@ export function startAcpSpawnParentStreamRelay(params: {
   };
 
   const noOutputWatcherTimer = setInterval(() => {
-    if (disposed) {
-      return;
-    }
-    if (stallNotified) {
-      return;
-    }
-    if (Date.now() - lastProgressAt < NO_OUTPUT_NOTICE_MS) {
+    if (disposed || stallNotified || Date.now() - lastProgressAt < NO_OUTPUT_NOTICE_MS) {
       return;
     }
     stallNotified = true;
@@ -502,7 +491,7 @@ export function startAcpSpawnParentStreamRelay(params: {
       if (phase === "prompt_submitted") {
         const at = asFiniteNumber(data?.at) ?? Date.now();
         promptSubmittedAt ??= at;
-        proxyEnvKeysAtPrompt = normalizeStringArray(data?.proxyEnvKeys);
+        proxyEnvKeysAtPrompt = filterStringEntries(data?.proxyEnvKeys).filter(Boolean);
         lastProgressAt = Date.now();
         return;
       }
